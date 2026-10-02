@@ -61,8 +61,10 @@ fn main() {
     // Capture build date (UTC).
     let build_date = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|elapsed| format_utc(i64::try_from(elapsed.as_secs()).unwrap_or(i64::MAX)))
-        .unwrap_or_else(|_| "unknown".to_string());
+        .map_or_else(
+            |_| "unknown".to_string(),
+            |elapsed| format_utc(i64::try_from(elapsed.as_secs()).unwrap_or(i64::MAX)),
+        );
 
     // Capture the rustc version (just the number, e.g. `1.85.0`).
     let rustc_version = command_stdout("rustc", &["--version"])
