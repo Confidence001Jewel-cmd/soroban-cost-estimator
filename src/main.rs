@@ -7,7 +7,7 @@ use soroban_cost_estimator::config_snapshot;
 use soroban_cost_estimator::error;
 use soroban_cost_estimator::report;
 use soroban_cost_estimator::report::formatter::{
-    ReportFormatter, TableFormatter, formatter_by_name,
+    formatter_by_name, ReportFormatter, TableFormatter,
 };
 use soroban_cost_estimator::rpc;
 use soroban_cost_estimator::wasm;
@@ -185,8 +185,6 @@ fn env_or_file_bool(value: bool, file: Option<bool>) -> bool {
 async fn main() {
     let args = cli::Cli::parse();
 
-    let default_level = if args.quiet {
-        "error"
     cli::init_color(args.color);
     cli::init_quiet(args.quiet);
 
@@ -221,6 +219,7 @@ async fn run(args: cli::Cli) -> error::AppResult<()> {
     let timeout = args.timeout;
     let max_retries = args.max_retries;
     let verbose = args.verbose;
+    let quiet = args.quiet;
     // `--precision` is a single global flag; read it once so every command
     // reads the same value.
     let precision = args.precision;
@@ -294,6 +293,7 @@ async fn run(args: cli::Cli) -> error::AppResult<()> {
                 precision,
                 &headers,
                 watch,
+                args.quiet,
                 args.wasm_info,
                 args.verbose,
                 auto_snapshot,
@@ -337,20 +337,13 @@ async fn run(args: cli::Cli) -> error::AppResult<()> {
             )
             .await
         }
-        cli::Command::WasmInfo { wasm, json } => cmd_wasm_info(&wasm, json, quiet),
-                args.wasm_info,
-                args.verbose,
-                auto_snapshot,
-            )
-            .await
-        }
         cli::Command::WasmInfo { wasm, json } => {
             let format = match (args.format, json) {
                 (Some(fmt), _) => fmt,
                 (None, true) => cli::OutputFormat::Json,
                 (None, false) => cli::OutputFormat::Table,
             };
-            cmd_wasm_info(&wasm, format)
+            cmd_wasm_info(&wasm, format, quiet)
         }
         cli::Command::Config { action } => match action {
             cli::ConfigAction::Snapshot {
@@ -404,6 +397,7 @@ async fn run(args: cli::Cli) -> error::AppResult<()> {
                         threshold_percent,
                         summary,
                         diff_format == cli::OutputFormat::Json,
+                        quiet,
                     )
                 } else {
                     cmd_config_diff(
@@ -418,6 +412,7 @@ async fn run(args: cli::Cli) -> error::AppResult<()> {
                         timeout,
                         max_retries,
                         &headers,
+                        quiet,
                         verbose,
                     )
                     .await
@@ -430,27 +425,6 @@ async fn run(args: cli::Cli) -> error::AppResult<()> {
                 cmd_config_export(network.as_deref(), &output)
             }
             cli::ConfigAction::Import { bundle } => cmd_config_import(&bundle),
-            cli::ConfigAction::Cache { action } => {
-                handle_cache_action(
-                    action,
-                    cli_format,
-                    &default_network,
-                    default_rpc_url.as_deref(),
-                    fallback,
-                    rps,
-                    timeout,
-                    max_retries,
-                    &headers,
-                    quiet,
-                )
-                .await
-            }
-            cli::CacheAction::Verify => cmd_cache_verify(quiet),
-            cli::CacheAction::Clear { network } => cmd_cache_clear(&network, quiet),
-                    verbose,
-                )
-                .await
-            }
         },
         cli::Command::Cache { action } => {
             handle_cache_action(
@@ -463,6 +437,7 @@ async fn run(args: cli::Cli) -> error::AppResult<()> {
                 timeout,
                 max_retries,
                 &headers,
+                quiet,
                 verbose,
             )
             .await
@@ -722,6 +697,7 @@ struct SimulationRequest<'a> {
     max_retries: usize,
     precision: u32,
     extra_headers: &'a [String],
+    quiet: bool,
     verbose: bool,
 }
 
@@ -808,7 +784,7 @@ async fn simulate_report(
         memory_bytes, latest_ledger, total_fee_stroops, "simulation complete"
     );
 
-    let fee_rates = fetch_fee_rates(&client).await;
+    let fee_rates = fetch_fee_rates(&client, req.quiet).await;
 
     let fee = report::fee_calc::compute_fee_breakdown(
         total_fee_stroops,
@@ -870,6 +846,7 @@ async fn cmd_estimate(
     precision: u32,
     extra_headers: &[String],
     watch: bool,
+    quiet: bool,
     wasm_info_flag: bool,
     verbose: bool,
     auto_snapshot: bool,
@@ -909,6 +886,7 @@ async fn cmd_estimate(
             max_retries,
             precision,
             extra_headers,
+            quiet,
             verbose,
         )
         .await;
@@ -929,6 +907,7 @@ async fn cmd_estimate(
             max_retries,
             precision,
             extra_headers,
+            quiet,
             verbose,
         )
         .await;
@@ -954,6 +933,7 @@ async fn cmd_estimate(
         max_retries,
         format == "table",
         wasm_info_flag,
+        quiet,
         verbose,
         dry_run,
     )
@@ -1080,13 +1060,14 @@ async fn estimate_once(
     max_retries: usize,
     print_wasm_hash: bool,
     wasm_info_flag: bool,
+    quiet: bool,
     verbose: bool,
     dry_run: bool,
 ) -> error::AppResult<EstimateRun> {
     let json_flag = format == "json";
     let table_mode = format == "table";
     use sha2::Digest;
-    use tracing::{Instrument, info_span};
+    use tracing::{info_span, Instrument};
 
     let span = info_span!(
         "cmd_estimate",
@@ -1156,7 +1137,7 @@ async fn estimate_once(
         if let Some(fresh) = fresh {
             let ttl_secs = ttl_secs.unwrap_or_default();
             info!(ttl_secs, function = %function_name, "cache hit — reusing fresh estimate");
-            print_cached_estimate(&fresh, ttl_secs, json_flag, precision);
+            print_cached_estimate(&fresh, ttl_secs, json_flag, precision, quiet);
             return Ok(EstimateRun::Cached);
         }
 
@@ -1240,6 +1221,7 @@ async fn estimate_once(
             max_retries,
             precision,
             extra_headers,
+            quiet,
             verbose,
         })
         .await?;
@@ -1407,6 +1389,7 @@ async fn emit_watch_estimate(
     precision: u32,
     extra_headers: &[String],
     human: bool,
+    quiet: bool,
     verbose: bool,
 ) {
     match estimate_once(
@@ -1435,6 +1418,7 @@ async fn emit_watch_estimate(
         // `--wasm-info` is a one-shot report; the watcher prints its own
         // per-build header instead.
         false,
+        quiet,
         verbose,
         // `--watch` wins over `--dry-run`: watching exists to re-simulate.
         false,
@@ -1497,6 +1481,7 @@ async fn estimate_watch_poll_once(
     precision: u32,
     extra_headers: &[String],
     human: bool,
+    quiet: bool,
     verbose: bool,
 ) -> error::AppResult<()> {
     let path = std::path::Path::new(wasm_path);
@@ -1539,6 +1524,7 @@ async fn estimate_watch_poll_once(
         precision,
         extra_headers,
         human,
+        quiet,
         verbose,
     )
     .await;
@@ -1574,6 +1560,7 @@ async fn cmd_estimate_watch(
     max_retries: usize,
     precision: u32,
     extra_headers: &[String],
+    quiet: bool,
     verbose: bool,
 ) -> error::AppResult<()> {
     use tracing::info;
@@ -1616,6 +1603,7 @@ async fn cmd_estimate_watch(
                 precision,
                 extra_headers,
                 human,
+                quiet,
                 verbose,
             )
             .await;
@@ -1658,6 +1646,7 @@ async fn cmd_estimate_watch(
                     precision,
                     extra_headers,
                     human,
+                    quiet,
                     verbose,
                 ).await;
                 tokio::time::sleep(WATCH_POLL_DURATION).await;
@@ -1689,6 +1678,7 @@ async fn cmd_estimate_diff(
     max_retries: usize,
     precision: u32,
     extra_headers: &[String],
+    quiet: bool,
     verbose: bool,
 ) -> error::AppResult<()> {
     use sha2::Digest;
@@ -1730,6 +1720,7 @@ async fn cmd_estimate_diff(
         max_retries,
         precision,
         extra_headers,
+        quiet,
         verbose,
     })
     .await?;
@@ -1751,6 +1742,7 @@ async fn cmd_estimate_diff(
         max_retries,
         precision,
         extra_headers,
+        quiet,
         verbose,
     })
     .await?;
@@ -1905,8 +1897,8 @@ async fn cmd_estimate_all(
     verbose: bool,
     auto_snapshot: bool,
 ) -> error::AppResult<()> {
-    use tracing::Instrument;
     use tracing::info_span;
+    use tracing::Instrument;
 
     let span = info_span!("cmd_estimate_all", wasm_path, network);
     async {
@@ -2162,7 +2154,7 @@ async fn estimate_all_function(
     precision: u32,
     quiet: bool,
 ) -> error::AppResult<EstimateAllResult> {
-    use tracing::{Instrument, debug, info_span};
+    use tracing::{debug, info_span, Instrument};
 
     let span =
         info_span!("estimate_all_function", fn = %fn_info.name, param_count = fn_info.param_count);
@@ -2309,8 +2301,7 @@ async fn estimate_all_function(
 ///
 /// # Network calls
 /// None — pure file I/O + parsing.
-fn cmd_wasm_info(wasm_path: &str, json_flag: bool, quiet: bool) -> error::AppResult<()> {
-fn cmd_wasm_info(wasm_path: &str, format: cli::OutputFormat) -> error::AppResult<()> {
+fn cmd_wasm_info(wasm_path: &str, format: cli::OutputFormat, quiet: bool) -> error::AppResult<()> {
     use sha2::Digest;
 
     let wasm_info = wasm::parser::load_wasm(std::path::Path::new(wasm_path))?;
@@ -2496,8 +2487,8 @@ async fn cmd_config_snapshot(
     quiet: bool,
     verbose: bool,
 ) -> error::AppResult<()> {
-    use tracing::Instrument;
     use tracing::info_span;
+    use tracing::Instrument;
 
     let span = info_span!("cmd_config_snapshot", network);
     async {
@@ -2721,7 +2712,7 @@ async fn cmd_config_diff(
         }
 
         if !machine && !summary {
-            print_stale_estimates(network, new_snapshot.ledger);
+            print_stale_estimates(network, new_snapshot.ledger, quiet);
         }
 
         let should_exit = match threshold_percent {
@@ -2757,6 +2748,7 @@ fn cmd_config_diff_against_previous(
     threshold_percent: Option<f64>,
     summary: bool,
     json_flag: bool,
+    quiet: bool,
 ) -> error::AppResult<()> {
     debug!(network, "diffing the two most recent snapshots");
     let (old_snapshot, new_snapshot) = config_snapshot::store::load_last_two_snapshots(network)?;
@@ -2785,7 +2777,7 @@ fn cmd_config_diff_against_previous(
                 threshold_percent,
             )
         );
-        print_stale_estimates(network, new_snapshot.ledger);
+        print_stale_estimates(network, new_snapshot.ledger, quiet);
     }
 
     let should_exit = match threshold_percent {
@@ -3162,12 +3154,10 @@ async fn cmd_watch(
 /// how much disk space it consumes (against the `--max-cache-size-mb` and
 /// `--max-cache-entries` quotas).
 ///
-#[allow(dead_code)]
-fn cmd_cache_stats(quiet: bool) -> error::AppResult<()> {
 /// # Network calls
 /// None — pure SQLite I/O.
 #[allow(dead_code)] // wired once the `config cache stats` subcommand (#41) lands
-fn cmd_cache_stats(json: bool) -> error::AppResult<()> {
+fn cmd_cache_stats(json: bool, quiet: bool) -> error::AppResult<()> {
     let stats = cache::cache_stats()?;
     let limits = cache::cache_limits();
 
@@ -3197,14 +3187,13 @@ fn cmd_cache_stats(json: bool) -> error::AppResult<()> {
     );
     print_cache_quota(limits);
 
-        if !stats.per_network.is_empty() {
-            println!("\nPer-network breakdown:");
-            for (network, count) in &stats.per_network {
-                println!(
-                    "  {network}: {count} entr{}",
-                    if *count == 1 { "y" } else { "ies" }
-                );
-            }
+    if !quiet && !stats.per_network.is_empty() {
+        println!("\nPer-network breakdown:");
+        for (network, count) in &stats.per_network {
+            println!(
+                "  {network}: {count} entr{}",
+                if *count == 1 { "y" } else { "ies" }
+            );
         }
     }
 
@@ -3420,10 +3409,11 @@ async fn handle_cache_action(
     timeout: u64,
     max_retries: usize,
     headers: &[String],
+    quiet: bool,
     verbose: bool,
 ) -> error::AppResult<()> {
     match action {
-        cli::CacheAction::Export { out } => cmd_cache_export(out.as_deref()),
+        cli::CacheAction::Export { out } => cmd_cache_export(out.as_deref(), quiet),
         cli::CacheAction::Warm {
             wasm,
             network,
@@ -3447,13 +3437,14 @@ async fn handle_cache_action(
                 timeout,
                 max_retries,
                 headers,
+                quiet,
                 verbose,
             )
             .await
         }
         cli::CacheAction::List { network, json } => cmd_cache_list(&network, json),
-        cli::CacheAction::Verify => cmd_cache_verify(),
-        cli::CacheAction::Clear { network } => cmd_cache_clear(&network),
+        cli::CacheAction::Verify => cmd_cache_verify(quiet),
+        cli::CacheAction::Clear { network } => cmd_cache_clear(&network, quiet),
         cli::CacheAction::Prune => cmd_cache_prune(),
         cli::CacheAction::Query {
             network,
@@ -3473,8 +3464,9 @@ async fn handle_cache_action(
             since.as_deref(),
             to.as_deref(),
             json,
+            quiet,
         ),
-        cli::CacheAction::Stats { json } => cmd_cache_stats(json),
+        cli::CacheAction::Stats { json } => cmd_cache_stats(json, quiet),
     }
 }
 
@@ -3535,44 +3527,27 @@ fn cmd_cache_query(
 
     if !quiet {
         let mut table = Table::new();
+        if crate::cli::should_colorize() {
+            table.enforce_styling();
+        } else {
+            table.force_no_tty();
+        }
         table.set_header(vec![
+            "Timestamp",
             "Function",
             "Network",
             "WASM Hash",
-            "Stroops",
-            "Ledger",
-            "Timestamp",
-    let mut table = Table::new();
-    if crate::cli::should_colorize() {
-        table.enforce_styling();
-    } else {
-        table.force_no_tty();
-    }
-    table.set_header(vec![
-        "Timestamp",
-        "Function",
-        "Network",
-        "WASM Hash",
-        "CPU",
-        "Fee (stroops)",
-    ]);
-    for e in &estimates {
-        table.add_row(vec![
-            Cell::new(e.timestamp.as_str()),
-            Cell::new(e.function.as_str()),
-            Cell::new(e.network.as_str()),
-            Cell::new(e.wasm_hash.as_str()),
-            Cell::new(e.cpu_instructions),
-            Cell::new(e.total_stroops),
+            "CPU",
+            "Fee (stroops)",
         ]);
         for e in &estimates {
             table.add_row(vec![
+                Cell::new(e.timestamp.as_str()),
                 Cell::new(e.function.as_str()),
                 Cell::new(e.network.as_str()),
                 Cell::new(e.wasm_hash.as_str()),
+                Cell::new(e.cpu_instructions),
                 Cell::new(e.total_stroops),
-                Cell::new(e.ledger),
-                Cell::new(e.timestamp.as_str()),
             ]);
         }
         println!("{table}");
@@ -3659,9 +3634,6 @@ fn cmd_config_import(bundle: &str) -> error::AppResult<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::EstimateAllJsonReport;
-    use super::EstimateAllResult;
-    use super::EstimateAllStatus;
     use super::parse_interval_secs;
     use super::settled_new_build_detected;
     use super::upgrade_detected;
@@ -3669,6 +3641,9 @@ mod tests {
     use super::wasm_info_json;
     use super::watch_build_header;
     use super::watch_cost_delta;
+    use super::EstimateAllJsonReport;
+    use super::EstimateAllResult;
+    use super::EstimateAllStatus;
     use soroban_cost_estimator::config_snapshot::diff;
     use soroban_cost_estimator::config_snapshot::model::{
         ConfigSnapshot, ContractComputeV0, ContractLedgerCostV0,
